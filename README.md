@@ -16,20 +16,25 @@ From the project folder:
 ```powershell
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r backend/requirements.txt
-.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8002
+npm install --prefix frontend
 ```
 
-In a second terminal:
+Start the app from the project root:
 
 ```powershell
-cd frontend
-npm install
-npm run build
-$env:RESQ_API_URL='http://127.0.0.1:8002'
-npm run preview -- --port 4175 --strictPort
+npm run dev
 ```
 
-Open http://127.0.0.1:4175. For development, use `npm run dev` instead of build/preview. Offline shell caching requires the production build/preview.
+This launches the FastAPI backend and the Vite frontend together, picks a free port if 8002 or 4175 are already occupied, and points the frontend at the API automatically.
+
+To serve the production build instead:
+
+```powershell
+npm run build
+npm run preview
+```
+
+Open http://127.0.0.1:4175. Offline shell caching requires the production build/preview.
 
 Responder access: enter a name and code `resq-demo`. Set `RESPONDER_CODE` in a project-root `.env` to override it. This is shared-code MVP access, not individual password accounts or production authorization. Keep one backend worker: mutation serialization and capacity checks are designed for this single-process SQLite MVP.
 

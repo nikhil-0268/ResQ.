@@ -104,7 +104,7 @@ def serialize(s,i,detail=False):
     result['has_hazard']=env['landslide_risk']=='high' or (env['temperature'] is not None and env['temperature']<0) or (env['rainfall_mm_per_hour'] or 0)>10
     if detail:
         for a in aus: a.pop('file_path',None)
-        for r in rs: r.pop('photo_path',None)
+        for r in rs: r.pop('photo_path',None); r.pop('voice_path',None)
         result.update(reports=rs,audio_events=aus,environmental_events=es,log=sorted(rows(s,Log,i.id),key=lambda x:-x['created_at']),alerts=sorted(rows(s,Alert,i.id),key=lambda x:-x['created_at'])[:10])
     return result
 
@@ -127,22 +127,29 @@ def gazetteer(): return AREAS
 def health(): return {'ok':True}
 
 @app.post('/api/reports')
-def report(request:Request,message:str=Form(min_length=3,max_length=5000),lat:float|None=Form(None),lng:float|None=Form(None),area:str|None=Form(None),location_source:Literal['gps','pin','gazetteer','none']=Form('pin'),phone:str=Form('',max_length=40),client_id:str=Form(default='',max_length=100),photo:UploadFile|None=File(None),s=Depends(db, scope='function')):
+def report(request:Request,message:str=Form(min_length=3,max_length=5000),lat:float|None=Form(None),lng:float|None=Form(None),area:str|None=Form(None),location_source:Literal['gps','pin','gazetteer','none']=Form('pin'),phone:str=Form('',max_length=40),client_id:str=Form(default='',max_length=100),photo:UploadFile|None=File(None),voice_recording:UploadFile|None=File(None),voice_duration_s:int=Form(0,ge=0,le=120),s=Depends(db, scope='function')):
     if client_id and (old:=s.get(Mutation,'report:'+client_id)): return old.response
     now=time.time(); key=request.client.host if request.client else 'local'; q=RATE[key]
     while q and q[0]<now-60: q.popleft()
     if len(q)>=10: raise HTTPException(429,'Too many reports. Retry after one minute.')
     q.append(now)
     lat,lng=location(lat,lng,area)
-    rid=('r-'+uuid.uuid5(uuid.NAMESPACE_URL,'resq:'+client_id).hex) if client_id else uid('r'); photo_path=None
+    rid=('r-'+uuid.uuid5(uuid.NAMESPACE_URL,'resq:'+client_id).hex) if client_id else uid('r'); photo_path=None; voice_path=None
     if photo:
         raw=photo.file.read(5*1024*1024+1)
         if len(raw)>5*1024*1024: raise HTTPException(413,'Photo must be at most 5 MB')
         ext='.jpg' if raw.startswith(b'\xff\xd8\xff') else '.png' if raw.startswith(b'\x89PNG\r\n\x1a\n') else None
         if not ext: raise HTTPException(422,'Upload a JPEG or PNG photo')
         photo_path=str(DATA/(rid+ext)); Path(photo_path).write_bytes(raw)
+    if voice_recording:
+        raw=voice_recording.file.read(10*1024*1024+1)
+        if len(raw)>10*1024*1024: raise HTTPException(413,'Voice recording must be at most 10 MB')
+        content_type=(voice_recording.content_type or '').lower()
+        if not raw or not content_type.startswith('audio/'): raise HTTPException(422,'Upload a browser audio recording')
+        ext='.m4a' if 'mp4' in content_type else '.webm'
+        voice_path=str(DATA/(rid+'-voice'+ext)); Path(voice_path).write_bytes(raw)
     # Persist original BEFORE external extraction, including on model failure.
-    r=s.get(Report,rid) or Report(id=rid,payload=dict(original_message=message,contact_phone=phone or None,photo_path=photo_path,has_photo=bool(photo_path),created_at=now,is_simulated=False,verification_status='unreviewed',extraction_status='failed',lat=lat,lng=lng,incident_type='unknown'))
+    r=s.get(Report,rid) or Report(id=rid,payload=dict(original_message=message,contact_phone=phone or None,photo_path=photo_path,has_photo=bool(photo_path),voice_path=voice_path,has_voice=bool(voice_path),voice_duration_s=voice_duration_s if voice_path else None,created_at=now,is_simulated=False,verification_status='unreviewed',extraction_status='failed',lat=lat,lng=lng,incident_type='unknown'))
     s.add(r); s.commit()
     data,status,method,error=extract(message)
     if lat is None:
@@ -221,7 +228,7 @@ def done(s,b):
 def status(iid:str,b:Status,s=Depends(db, scope='function')):
     if old:=duplicate(s,b): return old.response
     i=get(s,Incident,iid)
-    allowed={'pending':['investigating'],'investigating':['activity_confirmed','false_alarm','resolved'],'activity_confirmed':['resolved'],'resolved':['pending'],'false_alarm':['pending']}
+    allowed={'pending':['investigating','activity_confirmed','false_alarm'],'investigating':['activity_confirmed','false_alarm','resolved'],'activity_confirmed':['resolved'],'resolved':['pending'],'false_alarm':['pending']}
     if b.status not in allowed[i.status]: raise HTTPException(409,f'Cannot move {i.status} to {b.status}; refresh and review.')
     i.status=b.status; i.status_by=b.actor.strip(); i.status_at=time.time()
     log(s,iid,'status_change',b.status.replace('_',' ')+' · '+b.note,b.actor)
@@ -263,6 +270,11 @@ def locate(rid:str,b:Locate,s=Depends(db, scope='function')):
 def photo(rid:str,s=Depends(db, scope='function')):
     path=get(s,Report,rid).payload.get('photo_path')
     if not path or not Path(path).exists(): raise HTTPException(404,'Photo unavailable')
+    return FileResponse(path)
+@app.get('/api/reports/{rid}/voice',dependencies=[Depends(auth)])
+def report_voice(rid:str,s=Depends(db, scope='function')):
+    path=get(s,Report,rid).payload.get('voice_path')
+    if not path or not Path(path).exists(): raise HTTPException(404,'Voice recording unavailable')
     return FileResponse(path)
 
 DEMO={'tapping':('TAPPING_KNOCKING',True,True,4),'voice':('VOICE',True,False,None),'cough':('COUGHING',True,False,None),'traffic':('NON_HUMAN',False,False,None),'silence':('NON_HUMAN',False,False,None)}
